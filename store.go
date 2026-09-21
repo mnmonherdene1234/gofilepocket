@@ -30,6 +30,26 @@ func NewFileStore(baseDir string) *FileStore {
 	return &FileStore{baseDir: baseDir}
 }
 
+func (s *FileStore) EnsureWritable() error {
+	if err := os.MkdirAll(s.baseDir, 0o755); err != nil {
+		return fmt.Errorf("create storage dir %q: %w (hint: on Linux check ownership, e.g. chown -R $(id -u):$(id -g) %s)", s.baseDir, err, s.baseDir)
+	}
+
+	f, err := os.CreateTemp(s.baseDir, ".writetest-*")
+	if err != nil {
+		return fmt.Errorf("storage dir %q is not writable: %w (hint: on Linux with Docker bind mounts run: sudo chown -R $(id -u):$(id -g) ./files)", s.baseDir, err)
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		return fmt.Errorf("storage dir %q writability check failed on close: %w", s.baseDir, err)
+	}
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("storage dir %q writability check failed on cleanup: %w", s.baseDir, err)
+	}
+	return nil
+}
+
 func SafeBaseName(name string) string {
 	base := filepath.Base(strings.TrimSpace(name))
 	if base == "" || base == "." {

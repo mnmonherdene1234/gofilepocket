@@ -1,5 +1,12 @@
 # FilePocket API Reference
 
+## Base Prefix
+
+All paths below are shown without a prefix. When `API_PREFIX` is set
+(e.g. `API_PREFIX=/api/v1`), prepend it to every endpoint, including
+static files: `GET /api/v1/health`, `POST /api/v1/upload`,
+`GET /api/v1/files/{path}`.
+
 ## Authentication
 
 When `API_KEY_ENABLED=true`, include the configured API key header on these endpoints:
@@ -8,13 +15,13 @@ When `API_KEY_ENABLED=true`, include the configured API key header on these endp
 - `DELETE /delete`
 - `GET /list`
 - `GET /size`
-- `GET /download/{filename}`
-- static file access
 
-Public endpoints:
+Public endpoints (no API key needed, even when `API_KEY_ENABLED=true`):
 
 - `GET /`
 - `GET /health`
+- static file access (`GET /files/{path}`) — see below, this is
+  intentionally public so shared `downloadUrl` links work without a key
 
 ## GET /
 
@@ -113,21 +120,21 @@ Response:
 { "size": 1234 }
 ```
 
-## GET /download/{filename}
-
-Stream a stored file directly. Supports `Range`, `If-Modified-Since`, and `ETag` headers.
-
-The response includes:
-
-```
-Content-Disposition: inline; filename*=UTF-8''<percent-encoded filename>
-```
-
-Errors (file not found, invalid filename) are returned as JSON, unlike the static file server.
-
 ## GET /files/{path}
 
 Serve stored files statically when `IS_SERVE_STATIC_FILES=true`.
+
+> **Public by design.** This endpoint never requires an API key, even
+> when `API_KEY_ENABLED=true`. Anyone who knows (or guesses) the exact
+> filename can download it, e.g. `GET /files/report.txt`. Keep this in
+> mind for sensitive files: prefer non-guessable names (omit
+> `useOriginalFilename` so the server generates a unique name) or set
+> `IS_SERVE_STATIC_FILES=false` to disable static serving entirely and
+> manage access yourself.
+>
+> Directory listing is disabled: requesting the directory itself
+> (`GET /files/`) returns `404`, so filenames cannot be enumerated.
+> Only exact file paths are served.
 
 The actual prefix is configured by `STATIC_FILES_SERVE_PATH`.
 

@@ -66,6 +66,47 @@ func TestLoadConfig_APIKeyDisabled(t *testing.T) {
 	}
 }
 
+func TestNormalizeAPIPrefix(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		"/":         "",
+		"//":        "",
+		"api/v1":    "/api/v1",
+		"/api/v1":   "/api/v1",
+		"/api/v1/":  "/api/v1",
+		"  /api/v1  ": "/api/v1",
+		"/a/b/c":    "/a/b/c",
+	}
+	for input, want := range cases {
+		if got := normalizeAPIPrefix(input); got != want {
+			t.Errorf("normalizeAPIPrefix(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestLoadConfig_APIPrefixNormalized(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_PREFIX=/api/v1/\n"), 0o644); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	unsetEnv(t, "API_PREFIX")
+
+	originalCwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(originalCwd)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIPrefix != "/api/v1" {
+		t.Fatalf("expected APIPrefix %q, got %q", "/api/v1", cfg.APIPrefix)
+	}
+}
+
 func TestLoadConfig_DefaultUploadSizeIsUnlimited(t *testing.T) {
 	dir := t.TempDir()
 

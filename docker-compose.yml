@@ -4,10 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     image: gofilepocket:latest
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "${SERVER_PORT:-9935}:${SERVER_PORT:-9935}"
     environment:
       SERVER_PORT: ${SERVER_PORT:-9935}
+      API_PREFIX: ${API_PREFIX:-}
       FILES_DIR: /app/files
       STATIC_FILES_SERVE_PATH: ${STATIC_FILES_SERVE_PATH:-/files}
       IS_SERVE_STATIC_FILES: ${IS_SERVE_STATIC_FILES:-true}

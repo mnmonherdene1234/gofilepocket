@@ -19,6 +19,10 @@ func main() {
 
 	app := NewApp(cfg)
 
+	if err := app.EnsureStorage(); err != nil {
+		log.Fatal(err)
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.ServerPort,
 		Handler: app.Handler(),

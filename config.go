@@ -20,6 +20,7 @@ type Config struct {
 	ServeStaticFiles  bool
 	MaxUploadMemoryMB int64
 	MaxUploadSizeMB   int64
+	APIPrefix         string
 }
 
 func LoadConfig() (Config, error) {
@@ -37,6 +38,7 @@ func LoadConfig() (Config, error) {
 		ServeStaticFiles:  parseBool(getEnv("IS_SERVE_STATIC_FILES", "true")),
 		MaxUploadMemoryMB: parseInt64(getEnv("MAX_UPLOAD_MEMORY_MB", "32"), 32),
 		MaxUploadSizeMB:   parseNonNegativeInt64(getEnv("MAX_UPLOAD_SIZE_MB", "0"), 0),
+		APIPrefix:         normalizeAPIPrefix(getEnv("API_PREFIX", "")),
 	}
 
 	if cfg.APIKeyEnabled && cfg.APIKey == "" {
@@ -137,6 +139,21 @@ func parseNonNegativeInt64(value string, defaultValue int64) int64 {
 	return parsed
 }
 
+func normalizeAPIPrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || prefix == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	prefix = strings.TrimRight(prefix, "/")
+	if prefix == "" {
+		return ""
+	}
+	return prefix
+}
+
 func normalizeURLPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" || path == "/" {
@@ -158,6 +175,7 @@ func logConfig(cfg Config) {
 	log.Println("Serve static files:", cfg.ServeStaticFiles)
 	log.Println("Max upload memory MB:", cfg.MaxUploadMemoryMB)
 	log.Println("Max upload size MB:", cfg.MaxUploadSizeMB)
+	log.Println("API prefix:", cfg.APIPrefix)
 }
 
 func maskSecret(value string) string {

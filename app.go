@@ -4,10 +4,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -60,39 +60,52 @@ func NewAppWithLogger(cfg Config, logger *log.Logger) *App {
 	}
 }
 
+func (a *App) EnsureStorage() error {
+	return a.store.EnsureWritable()
+}
+
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
+	p := a.config.APIPrefix
 
-	mux.Handle("GET /{$}", a.public(http.HandlerFunc(a.handleIndex)))
-	mux.Handle("GET /health", a.public(http.HandlerFunc(a.handleHealth)))
-	mux.Handle("POST /upload", a.protected(http.HandlerFunc(a.handleUpload)))
-	mux.Handle("DELETE /delete", a.protected(http.HandlerFunc(a.handleDelete)))
-	mux.Handle("GET /list", a.protected(http.HandlerFunc(a.handleList)))
-	mux.Handle("GET /size", a.protected(http.HandlerFunc(a.handleSize)))
-	mux.Handle("GET /download/{filename}", a.protected(http.HandlerFunc(a.handleDownload)))
+	mux.Handle("GET "+p+"/{$}", a.public(http.HandlerFunc(a.handleIndex)))
+	mux.Handle("GET "+p+"/health", a.public(http.HandlerFunc(a.handleHealth)))
+	mux.Handle("POST "+p+"/upload", a.protected(http.HandlerFunc(a.handleUpload)))
+	mux.Handle("DELETE "+p+"/delete", a.protected(http.HandlerFunc(a.handleDelete)))
+	mux.Handle("GET "+p+"/list", a.protected(http.HandlerFunc(a.handleList)))
+	mux.Handle("GET "+p+"/size", a.protected(http.HandlerFunc(a.handleSize)))
+
+	if p != "" {
+		mux.Handle(p, http.RedirectHandler(p+"/", http.StatusMovedPermanently))
+	}
 
 	if a.config.ServeStaticFiles {
-		staticPrefix := a.config.StaticFilesPath + "/"
-		fileServer := http.StripPrefix(staticPrefix, http.FileServer(http.Dir(a.config.FilesDir)))
-		mux.Handle(staticPrefix, a.protected(fileServer))
-		mux.Handle(a.config.StaticFilesPath, a.protected(http.RedirectHandler(staticPrefix, http.StatusMovedPermanently)))
+		fullStatic := a.fullStaticPath()
+		staticPrefix := fullStatic + "/"
+		fileServer := http.StripPrefix(staticPrefix, http.FileServer(noDirListFS{root: http.Dir(a.config.FilesDir)}))
+		mux.Handle(staticPrefix, a.public(fileServer))
+		mux.Handle(fullStatic, a.public(http.RedirectHandler(staticPrefix, http.StatusMovedPermanently)))
 	}
 
 	return a.withCORS(a.withLogging(mux))
 }
 
+func (a *App) fullStaticPath() string {
+	return a.config.APIPrefix + a.config.StaticFilesPath
+}
+
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
+	p := a.config.APIPrefix
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"name": "FilePocket",
 		"endpoints": []string{
-			"GET /health",
-			"POST /upload",
-			"DELETE /delete",
-			"GET /list",
-			"GET /size",
-			"GET /download/{filename}",
+			"GET " + p + "/health",
+			"POST " + p + "/upload",
+			"DELETE " + p + "/delete",
+			"GET " + p + "/list",
+			"GET " + p + "/size",
 		},
-		"static_files_path": a.config.StaticFilesPath,
+		"static_files_path": a.fullStaticPath(),
 	})
 }
 
@@ -140,7 +153,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	var downloadURL string
 	if a.config.ServeStaticFiles {
-		downloadURL = a.config.StaticFilesPath + "/" + url.PathEscape(filename)
+		downloadURL = a.fullStaticPath() + "/" + url.PathEscape(filename)
 	}
 
 	a.writeJSON(w, http.StatusOK, UploadResponse{
@@ -194,27 +207,29 @@ func (a *App) handleSize(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, SizeResponse{Size: size})
 }
 
-func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
-	filename := r.PathValue("filename")
-	f, err := a.store.Open(filename)
-	if err != nil {
-		a.writeStoreError(w, "Failed to open file", err)
-		return
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		a.writeError(w, http.StatusInternalServerError, "Failed to stat file", err)
-		return
-	}
-
-	w.Header().Set("Content-Disposition", "inline; filename=\""+quotedStringEscape(filename)+"\"; filename*=UTF-8''"+rfc5987Encode(filename))
-	http.ServeContent(w, r, filename, info.ModTime(), f)
-}
-
 func (a *App) public(next http.Handler) http.Handler {
 	return next
+}
+
+type noDirListFS struct {
+	root http.Dir
+}
+
+func (fs noDirListFS) Open(name string) (http.File, error) {
+	f, err := fs.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		f.Close()
+		return nil, os.ErrNotExist
+	}
+	return f, nil
 }
 
 func (a *App) protected(next http.Handler) http.Handler {
@@ -301,44 +316,4 @@ func (a *App) writeJSON(w http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		a.logger.Printf("failed to encode response: %v", err)
 	}
-}
-
-// quotedStringEscape produces a safe ASCII value for the quoted-string syntax
-// used in Content-Disposition filename= parameters (RFC 6266 / RFC 2616).
-// Non-ASCII bytes and control characters are stripped; `"` and `\` are
-// backslash-escaped.
-func quotedStringEscape(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c > 0x7E {
-			// skip non-printable / non-ASCII bytes
-			continue
-		}
-		if c == '"' || c == '\\' {
-			b.WriteByte('\\')
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
-}
-
-// rfc5987Encode percent-encodes a string per the attr-char set defined in
-// RFC 5987 §3.2.1 for use in Content-Disposition filename* parameters.
-// We iterate over the raw UTF-8 bytes because RFC 5987 encodes the byte
-// representation of the charset (UTF-8 here), not Unicode code points.
-func rfc5987Encode(s string) string {
-	var b strings.Builder
-	for _, c := range []byte(s) {
-		// attr-char = ALPHA / DIGIT / "!" / "#" / "$" / "&" / "+" / "-" / "." /
-		//             "^" / "_" / "`" / "|" / "~"  (RFC 5987 §3.2.1)
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-			c == '!' || c == '#' || c == '$' || c == '&' || c == '+' || c == '-' ||
-			c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~' {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
 }

@@ -439,81 +439,166 @@ func TestSavePartialCleanupOnCopyError(t *testing.T) {
 	}
 }
 
-func TestHandleDownload(t *testing.T) {
+func TestStaticFilesArePublicWhenAPIKeyEnabled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "public.txt"), []byte("public content"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	app := newTestApp(Config{
+		APIKeyEnabled:    true,
+		APIKeyHeader:     "X-API-Key",
+		APIKey:           "secret",
+		FilesDir:         dir,
+		StaticFilesPath:  "/files",
+		ServeStaticFiles: true,
+	})
+
+	// Static file access without an API key must succeed.
+	rr := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/files/public.txt", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 without API key, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); got != "public content" {
+		t.Fatalf("expected body %q, got %q", "public content", got)
+	}
+
+	// The extensionless /files redirect must be public too.
+	rr = httptest.NewRecorder()
+	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/files", nil))
+	if rr.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected 301 without API key, got %d", rr.Code)
+	}
+}
+
+func TestAPIPrefixRouting(t *testing.T) {
 	dir := t.TempDir()
 	app := newTestApp(Config{
 		FilesDir:          dir,
+		APIPrefix:         "/api/v1",
+		StaticFilesPath:   "/files",
+		ServeStaticFiles:  true,
 		MaxUploadMemoryMB: 32,
 		MaxUploadSizeMB:   100,
 	})
+	h := app.Handler()
 
-	content := "hello download"
+	// Health under the prefix.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed health, got %d", rr.Code)
+	}
 
-	// Upload the file first
-	req, err := newMultipartUploadRequest("fetch me.txt", content, true)
+	// Old unprefixed paths must not serve.
+	for _, target := range []string{"/health", "/list", "/size"} {
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for legacy path %s, got %d", target, rr.Code)
+		}
+	}
+
+	// Upload under the prefix.
+	req, err := newMultipartUploadRequest("prefixed.txt", "data", true)
 	if err != nil {
-		t.Fatalf("build upload request: %v", err)
+		t.Fatalf("build request: %v", err)
 	}
-	rr := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("upload failed: %d %s", rr.Code, rr.Body.String())
-	}
-
-	// Download via the new endpoint (filename URL-encoded in path)
+	req.URL.Path = "/api/v1/upload"
 	rr = httptest.NewRecorder()
-	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/download/fetch%20me.txt", nil))
+	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		t.Fatalf("expected 200 for prefixed upload, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if got := rr.Body.String(); got != content {
-		t.Fatalf("expected body %q, got %q", content, got)
+	var uploadResp UploadResponse
+	if err := json.NewDecoder(rr.Body).Decode(&uploadResp); err != nil {
+		t.Fatalf("decode upload: %v", err)
 	}
-	cd := rr.Header().Get("Content-Disposition")
-	if !strings.Contains(cd, "inline") {
-		t.Fatalf("expected inline content-disposition, got %q", cd)
+	if uploadResp.DownloadURL != "/api/v1/files/prefixed.txt" {
+		t.Fatalf("unexpected prefixed download URL: %q", uploadResp.DownloadURL)
 	}
-	if !strings.Contains(cd, `filename="fetch me.txt"`) {
-		t.Fatalf("expected ascii filename in content-disposition, got %q", cd)
-	}
-	if !strings.Contains(cd, "filename*=UTF-8''fetch%20me.txt") {
-		t.Fatalf("expected RFC 5987 filename* in content-disposition, got %q", cd)
-	}
-}
 
-func TestHandleDownloadNotFound(t *testing.T) {
-	app := newTestApp(Config{FilesDir: t.TempDir()})
-	rr := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/download/nosuchfile.txt", nil))
+	// List and size under the prefix.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/list", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed list, got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/size", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed size, got %d", rr.Code)
+	}
+
+	// Static file under the prefix; directory listing stays disabled.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/files/prefixed.txt", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed static file, got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/files/", nil))
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", rr.Code)
+		t.Fatalf("expected 404 for prefixed directory listing, got %d", rr.Code)
+	}
+
+	// Index reports prefixed endpoints and static path.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed index, got %d", rr.Code)
+	}
+	var index map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&index); err != nil {
+		t.Fatalf("decode index: %v", err)
+	}
+	if index["static_files_path"] != "/api/v1/files" {
+		t.Fatalf("unexpected static_files_path: %v", index["static_files_path"])
+	}
+	found := false
+	for _, e := range index["endpoints"].([]any) {
+		if e.(string) == "POST /api/v1/upload" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected prefixed endpoints in index, got %v", index["endpoints"])
+	}
+
+	// Delete under the prefix.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/v1/delete", strings.NewReader(`{"filename":"prefixed.txt"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for prefixed delete, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
-func TestHandleDownloadPathTraversalRejected(t *testing.T) {
-	app := newTestApp(Config{FilesDir: t.TempDir()})
-	rr := httptest.NewRecorder()
-	// Go's ServeMux cleans paths, but the store also validates independently
-	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/download/..%2Foutside.txt", nil))
-	if rr.Code == http.StatusOK {
-		t.Fatal("expected non-200 for path traversal attempt")
+func TestStaticDirListingDisabled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "secret1.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
 	}
-}
-
-func TestHandleDownloadRequiresAPIKey(t *testing.T) {
 	app := newTestApp(Config{
-		APIKeyEnabled:     true,
-		APIKeyHeader:      "X-API-Key",
-		APIKey:            "secret",
-		FilesDir:          t.TempDir(),
-		MaxUploadMemoryMB: 32,
-		MaxUploadSizeMB:   100,
+		FilesDir:         dir,
+		StaticFilesPath:  "/files",
+		ServeStaticFiles: true,
 	})
 
+	// Directory listing must not expose filenames.
 	rr := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/download/anything.txt", nil))
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", rr.Code)
+	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/files/", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for directory listing, got %d", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), "secret1.txt") {
+		t.Fatal("directory listing exposed filenames")
+	}
+
+	// Exact file paths must keep working.
+	rr = httptest.NewRecorder()
+	app.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/files/secret1.txt", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for exact file, got %d", rr.Code)
 	}
 }
 

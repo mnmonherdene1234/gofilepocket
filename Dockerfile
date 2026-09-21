@@ -10,8 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gofilep
 
 FROM alpine:3.21
 
-RUN addgroup -S app \
-    && adduser -S app -G app \
+RUN addgroup -S -g 1000 app \
+    && adduser -S -u 1000 -G app app \
     && mkdir -p /app/files \
     && chown -R app:app /app
 
@@ -28,6 +28,6 @@ EXPOSE 9935
 
 USER app
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget -qO- http://127.0.0.1:${SERVER_PORT}/health >/dev/null 2>&1 || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget -qO- http://127.0.0.1:${SERVER_PORT}${API_PREFIX:-}/health >/dev/null 2>&1 || exit 1
 
 CMD ["/usr/local/bin/gofilepocket"]
